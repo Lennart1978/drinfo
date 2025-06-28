@@ -12,9 +12,18 @@ A lightweight command-line tool to monitor disk usage on Linux systems with beau
 
 ## Build
 
+```bash
 make
+```
 
 ## install
 
+```bash
 sudo make install
+```
+
+## Screenshot
+
+![screenshot](screenshot_28062025_200709.jpg)
+
 
