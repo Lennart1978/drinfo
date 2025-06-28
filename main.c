@@ -117,49 +117,6 @@ int max_visible_line_length(const char *lines[], int n)
     return max;
 }
 
-// Helper: find UUID from /dev/disk/by-uuid
-void get_uuid(const char *device, char *uuid, size_t uuid_size)
-{
-    uuid[0] = '\0';
-    FILE *fp = popen("ls -l /dev/disk/by-uuid/", "r");
-    if (!fp)
-        return;
-    char line[512];
-    while (fgets(line, sizeof(line), fp))
-    {
-        char *p = strstr(line, "> ");
-        if (p && strstr(line, device))
-        {
-            char *start = line;
-            while (*start == ' ')
-                start++;
-            char *end = strchr(start, ' ');
-            if (end && (end - start) < (int)uuid_size)
-            {
-                strncpy(uuid, start, end - start);
-                uuid[end - start] = '\0';
-                break;
-            }
-        }
-    }
-    pclose(fp);
-}
-
-// Helper: mount time (ctime of mountpoint)
-void get_mount_time(const char *mountpoint, char *buf, size_t bufsize)
-{
-    struct stat st;
-    if (stat(mountpoint, &st) == 0)
-    {
-        struct tm *tm = localtime(&st.st_ctime);
-        strftime(buf, bufsize, "%Y-%m-%d %H:%M:%S", tm);
-    }
-    else
-    {
-        snprintf(buf, bufsize, "unknown");
-    }
-}
-
 int main()
 {
     printf("\n");
