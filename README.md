@@ -1,5 +1,5 @@
 ![logo](logo.png)
-# Drive info - drinfo
+# drinfo - drive info
 
 A lightweight command-line tool to monitor disk usage on Linux systems with beautiful colored progress bars.
 
