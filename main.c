@@ -74,7 +74,42 @@
 #define MOUNT_TABLE_PATH "/proc/mounts"
 #define GVFS_BASE_PATH "/run/user/%d/gvfs"
 
+// Maximum number of drives to handle
+#define MAX_DRIVES 100
+
+// Structure to hold drive information
+typedef struct
+{
+    char mount_point[MAX_PATH_LENGTH];
+    char filesystem[MAX_SIZE_STR_LENGTH];
+    char device[MAX_PATH_LENGTH];
+    char total_str[MAX_SIZE_STR_LENGTH];
+    char used_str[MAX_SIZE_STR_LENGTH];
+    char available_str[MAX_SIZE_STR_LENGTH];
+    unsigned long long total_bytes;
+    unsigned long long used_bytes;
+    unsigned long long available_bytes;
+    double usage_percent;
+    const char *drive_type;
+    char *progress_bar;
+    int is_cloud_storage;
+    char cloud_service_name[MAX_SIZE_STR_LENGTH];
+} drive_info_t;
+
 char colorbuf[COLOR_BUFFER_SIZE]; // For bar colors
+
+// Function to compare drives by total capacity (descending order)
+int compare_drives_by_capacity(const void *a, const void *b)
+{
+    const drive_info_t *drive_a = (const drive_info_t *)a;
+    const drive_info_t *drive_b = (const drive_info_t *)b;
+
+    if (drive_b->total_bytes > drive_a->total_bytes)
+        return 1;
+    if (drive_b->total_bytes < drive_a->total_bytes)
+        return -1;
+    return 0;
+}
 
 // Function to display help text
 void show_help(const char *program_name)
@@ -264,7 +299,7 @@ int is_cloud_storage_directory(const char *path)
 }
 
 // Function to get cloud storage info from GVFS
-void get_cloud_storage_info(const char *gvfs_path, int *drive_count)
+void get_cloud_storage_info(const char *gvfs_path, drive_info_t *drives, int *drive_count)
 {
     DIR *dir = opendir(gvfs_path);
     if (!dir)
@@ -272,7 +307,7 @@ void get_cloud_storage_info(const char *gvfs_path, int *drive_count)
 
     struct dirent *entry;
 
-    while ((entry = readdir(dir)) != NULL)
+    while ((entry = readdir(dir)) != NULL && *drive_count < MAX_DRIVES)
     {
         // Use stat if d_type is not available
         struct stat st;
@@ -375,20 +410,27 @@ void get_cloud_storage_info(const char *gvfs_path, int *drive_count)
                 service_name = "MEGA";
             }
 
-            // Output
-            printf("  " BOLD_YELLOW_FORMAT "Network Drive %d (%s)" RESET_COLOR_FORMAT "\n", *drive_count + 1, service_name);
-            printf("  Mount point:   %s\n", full_path);
-            printf("  Filesystem:    %s\n", "fuse.gvfsd-fuse");
-            printf("  Device:        %s\n", entry->d_name);
-            printf("  Total size:    %s\n", total_str);
-            printf("  Used:          %s\n", used_str);
-            printf("  Available:     %s\n", available_str);
+            // Store information in drive_info_t structure
+            drive_info_t *drive = &drives[*drive_count];
+            strncpy(drive->mount_point, full_path, sizeof(drive->mount_point) - 1);
+            drive->mount_point[sizeof(drive->mount_point) - 1] = '\0';
+            strncpy(drive->filesystem, "fuse.gvfsd-fuse", sizeof(drive->filesystem) - 1);
+            drive->filesystem[sizeof(drive->filesystem) - 1] = '\0';
+            strncpy(drive->device, entry->d_name, sizeof(drive->device) - 1);
+            drive->device[sizeof(drive->device) - 1] = '\0';
+            snprintf(drive->total_str, sizeof(drive->total_str), "%s", total_str);
+            snprintf(drive->used_str, sizeof(drive->used_str), "%s", used_str);
+            snprintf(drive->available_str, sizeof(drive->available_str), "%s", available_str);
+            drive->total_bytes = total_bytes;
+            drive->used_bytes = used_bytes;
+            drive->available_bytes = available_bytes;
+            drive->usage_percent = usage_percent;
+            drive->drive_type = "Network Drive";
+            drive->progress_bar = bar;
+            drive->is_cloud_storage = 1;
+            strncpy(drive->cloud_service_name, service_name, sizeof(drive->cloud_service_name) - 1);
+            drive->cloud_service_name[sizeof(drive->cloud_service_name) - 1] = '\0';
 
-            int bar_visible_len = visible_length(bar);
-            int bar_padding = content_width - bar_visible_len;
-            printf("  %s%*s\n", bar, bar_padding, "");
-
-            free(bar);
             (*drive_count)++;
         }
     }
@@ -413,6 +455,11 @@ int main(int argc, char *argv[])
     }
 
     printf("\n");
+
+    // Array to store all drive information
+    drive_info_t drives[MAX_DRIVES];
+    int drive_count = 0;
+
     // Open the mount table
     FILE *mtab = setmntent(MOUNT_TABLE_PATH, "r");
     if (mtab == NULL)
@@ -422,10 +469,9 @@ int main(int argc, char *argv[])
     }
 
     struct mntent *entry;
-    int drive_count = 0;
 
-    // Loop through all mount points
-    while ((entry = getmntent(mtab)) != NULL)
+    // Loop through all mount points and collect drive information
+    while ((entry = getmntent(mtab)) != NULL && drive_count < MAX_DRIVES)
     {
         // Skip special file systems
         if (strcmp(entry->mnt_type, "proc") == 0 ||
@@ -506,7 +552,7 @@ int main(int argc, char *argv[])
         if (!bar)
         {
             perror("malloc");
-            exit(1);
+            continue;
         }
         bar[0] = '\0';
         for (int i = 0; i < bar_length; i++)
@@ -531,18 +577,8 @@ int main(int argc, char *argv[])
                 strncat(bar, "\033[48;2;64;64;64m\033[38;2;160;160;160m░\033[0m", bar_bufsize - strlen(bar) - 1);
             }
         }
-        size_t barline_bufsize = bar_bufsize + BARLINE_BUFFER_EXTRA;
-        char *barline = malloc(barline_bufsize);
-        if (!barline)
-        {
-            perror("malloc");
-            free(bar);
-            exit(1);
-        }
-        snprintf(barline, barline_bufsize, "[%-*s]", bar_length, ""); // Placeholder for padding
-        snprintf(barline, barline_bufsize, "[%-*s]", bar_length, ""); // for padding
 
-        // Content
+        // Determine drive type
         const char *drive_type;
         if (is_physical_device(entry->mnt_fsname))
         {
@@ -556,20 +592,27 @@ int main(int argc, char *argv[])
         {
             drive_type = "Other Drive";
         }
-        printf("  " BOLD_YELLOW_FORMAT "%s %d" RESET_COLOR_FORMAT "\n", drive_type, drive_count + 1);
-        printf("  Mount point:   %s\n", entry->mnt_dir);
-        printf("  Filesystem:    %s\n", entry->mnt_type);
-        printf("  Device:        %s\n", entry->mnt_fsname);
-        printf("  Total size:    %s\n", total_str);
-        printf("  Used:          %s\n", used_str);
-        printf("  Available:     %s\n", available_str);
-        // Progress bar
-        int bar_visible_len = visible_length(bar);
-        int bar_padding = content_width - bar_visible_len;
-        printf("  %s%*s\n", bar, bar_padding, "");
 
-        free(bar);
-        free(barline);
+        // Store information in drive_info_t structure
+        drive_info_t *drive = &drives[drive_count];
+        strncpy(drive->mount_point, entry->mnt_dir, sizeof(drive->mount_point) - 1);
+        drive->mount_point[sizeof(drive->mount_point) - 1] = '\0';
+        strncpy(drive->filesystem, entry->mnt_type, sizeof(drive->filesystem) - 1);
+        drive->filesystem[sizeof(drive->filesystem) - 1] = '\0';
+        strncpy(drive->device, entry->mnt_fsname, sizeof(drive->device) - 1);
+        drive->device[sizeof(drive->device) - 1] = '\0';
+        snprintf(drive->total_str, sizeof(drive->total_str), "%s", total_str);
+        snprintf(drive->used_str, sizeof(drive->used_str), "%s", used_str);
+        snprintf(drive->available_str, sizeof(drive->available_str), "%s", available_str);
+        drive->total_bytes = total_bytes;
+        drive->used_bytes = used_bytes;
+        drive->available_bytes = available_bytes;
+        drive->usage_percent = usage_percent;
+        drive->drive_type = drive_type;
+        drive->progress_bar = bar;
+        drive->is_cloud_storage = 0;
+        drive->cloud_service_name[0] = '\0';
+
         drive_count++;
     }
 
@@ -580,7 +623,48 @@ int main(int argc, char *argv[])
     snprintf(gvfs_path, sizeof(gvfs_path), GVFS_BASE_PATH, getuid());
     if (is_cloud_storage_directory(gvfs_path))
     {
-        get_cloud_storage_info(gvfs_path, &drive_count);
+        get_cloud_storage_info(gvfs_path, drives, &drive_count);
+    }
+
+    // Sort drives by capacity (largest first)
+    qsort(drives, drive_count, sizeof(drive_info_t), compare_drives_by_capacity);
+
+    // Display sorted drives
+    for (int i = 0; i < drive_count; i++)
+    {
+        drive_info_t *drive = &drives[i];
+
+        // Display drive information
+        if (drive->is_cloud_storage)
+        {
+            printf("  " BOLD_YELLOW_FORMAT "Network Drive %d (%s)" RESET_COLOR_FORMAT "\n", i + 1, drive->cloud_service_name);
+        }
+        else
+        {
+            printf("  " BOLD_YELLOW_FORMAT "%s %d" RESET_COLOR_FORMAT "\n", drive->drive_type, i + 1);
+        }
+        printf("  Mount point:   %s\n", drive->mount_point);
+        printf("  Filesystem:    %s\n", drive->filesystem);
+        printf("  Device:        %s\n", drive->device);
+        printf("  Total size:    %s\n", drive->total_str);
+        printf("  Used:          %s\n", drive->used_str);
+        printf("  Available:     %s\n", drive->available_str);
+
+        // Progress bar
+        int terminal_width = get_terminal_width();
+        int box_width = terminal_width * TERMINAL_WIDTH_PERCENTAGE / TERMINAL_WIDTH_DIVISOR;
+        if (box_width > MAX_BOX_WIDTH)
+            box_width = MAX_BOX_WIDTH;
+        if (box_width < MIN_BOX_WIDTH)
+            box_width = MIN_BOX_WIDTH;
+        int content_width = box_width - FRAME_PADDING;
+
+        int bar_visible_len = visible_length(drive->progress_bar);
+        int bar_padding = content_width - bar_visible_len;
+        printf("  %s%*s\n", drive->progress_bar, bar_padding, "");
+
+        // Free allocated memory
+        free(drive->progress_bar);
     }
 
     if (drive_count == 0)
