@@ -15,3 +15,7 @@ jobs:
     - uses: actions/checkout@v4   
     - name: make
       run: make   
+
+permissions:
+  contents: read
+  pull-requests: write
