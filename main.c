@@ -117,6 +117,37 @@ int max_visible_line_length(const char *lines[], int n)
     return max;
 }
 
+typedef struct {
+    double percent; // ex: 50.5%
+
+    // formatted sizes, ex: 22.20 GB
+    char used_str[64];
+    char available_str[64];
+    char total_str[64];
+} UsageInfo;
+
+
+UsageInfo get_usage(struct statvfs fs_info){        
+        // raw bytes
+        unsigned long long total_bytes = (unsigned long long)fs_info.f_blocks * fs_info.f_frsize;
+        unsigned long long available_bytes = (unsigned long long)fs_info.f_bavail * fs_info.f_frsize;
+        unsigned long long used_bytes = total_bytes - available_bytes;
+
+        UsageInfo usage = {
+            .percent = calculate_usage_percent(total_bytes, available_bytes),
+            .used_str = {0},
+            .available_str = {0},
+            .total_str = {0}
+        };
+
+        // human friendly
+        format_bytes(used_bytes, usage.used_str, sizeof(usage.used_str));
+        format_bytes(available_bytes, usage.available_str, sizeof(usage.available_str));
+        format_bytes(total_bytes, usage.total_str, sizeof(usage.total_str));
+        return usage;
+}
+
+
 int main()
 {
     printf("\n");
@@ -168,16 +199,8 @@ int main()
             continue; // Skip if no information available
         }
 
-        // Calculate sizes
-        unsigned long long total_bytes = (unsigned long long)fs_info.f_blocks * fs_info.f_frsize;
-        unsigned long long available_bytes = (unsigned long long)fs_info.f_bavail * fs_info.f_frsize;
-        unsigned long long used_bytes = total_bytes - available_bytes;
-
-        // Format sizes for output
-        char total_str[64], used_str[64], available_str[64];
-        format_bytes(total_bytes, total_str, sizeof(total_str));
-        format_bytes(used_bytes, used_str, sizeof(used_str));
-        format_bytes(available_bytes, available_str, sizeof(available_str));
+        // Calculate Usage & get formatted output
+        UsageInfo usage_info = get_usage(fs_info);
 
         // Target width: 80% of terminal width or max. 120 characters
         int terminal_width = get_terminal_width();
@@ -191,13 +214,14 @@ int main()
         if (bar_length < 10)
             bar_length = 10;
 
-        // Calculate usage
-        double usage_percent = calculate_usage_percent(total_bytes, available_bytes);
-        int filled_length = (int)((usage_percent / 100.0) * bar_length);
+
+        // Calulate bar
+        int filled_length = (int)((usage_info.percent / 100.0) * bar_length);
         char percent_text[16];
-        snprintf(percent_text, sizeof(percent_text), "%.1f%%", usage_percent);
+        snprintf(percent_text, sizeof(percent_text), "%.1f%%", usage_info.percent);
         int text_length = strlen(percent_text);
         int text_start = filled_length > text_length ? (filled_length - text_length) / 2 : 0;
+        
 
         // Dynamically allocate progress bar
         size_t bar_bufsize = bar_length * 64 + 1;
@@ -246,9 +270,10 @@ int main()
         printf("  Mount point:   %s\n", entry->mnt_dir);
         printf("  Filesystem:    %s\n", entry->mnt_type);
         printf("  Device:        %s\n", entry->mnt_fsname);
-        printf("  Total size:    %s\n", total_str);
-        printf("  Used:          %s\n", used_str);
-        printf("  Available:     %s\n", available_str);
+        printf("  Total size:    %s\n", usage_info.total_str);
+        printf("  Used:          %s\n", usage_info.used_str);
+        printf("  Available:     %s\n", usage_info.available_str);
+
         // Progress bar
         int bar_visible_len = visible_length(bar);
         int bar_padding = content_width - bar_visible_len;
