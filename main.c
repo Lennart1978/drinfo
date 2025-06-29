@@ -10,8 +10,33 @@
 #include <termios.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <dirent.h>
+
+#define TERM_FALLBACK_WIDTH 80
+#define VERSION "1.0.0"
 
 char colorbuf[32]; // For bar colors
+
+// Function to display help text
+void show_help(const char *program_name)
+{
+    printf("Usage: %s [OPTIONS]\n", program_name);
+    printf("\n");
+    printf("Display information about available drives and their storage space.\n");
+    printf("\n");
+    printf("Options:\n");
+    printf("  -h, --help     Show this help message\n");
+    printf("  -v, --version  Show program version\n");
+    printf("\n");
+    printf("This program is licensed under the MIT License.\n");
+    printf("https://github.com/lennart1978/drinfo\n");
+}
+
+// Function to display version
+void show_version()
+{
+    printf("drinfo Version %s\n", VERSION);
+}
 
 // Function to get terminal width
 int get_terminal_width()
@@ -21,7 +46,7 @@ int get_terminal_width()
     {
         return w.ws_col;
     }
-    return 80; // Fallback-Value
+    return TERM_FALLBACK_WIDTH; // Fallback-Value
 }
 
 // Function to format bytes into human-readable sizes
@@ -62,6 +87,36 @@ int is_physical_device(const char *fsname)
     return (strncmp(fsname, "/dev/sd", 7) == 0 ||
             strncmp(fsname, "/dev/nvme", 9) == 0 ||
             strncmp(fsname, "/dev/hd", 7) == 0);
+}
+
+int is_network_device(const char *fsname)
+{
+    // Check for network file systems
+    return (strncmp(fsname, "//", 2) == 0 ||   // SMB/CIFS shares
+            strncmp(fsname, "\\\\", 2) == 0 || // Windows network paths
+            strstr(fsname, ":") != NULL);      // NFS and other network protocols
+}
+
+int is_network_filesystem(const char *fstype)
+{
+    // Check for network file system types
+    return (strcmp(fstype, "nfs") == 0 ||
+            strcmp(fstype, "nfs4") == 0 ||
+            strcmp(fstype, "cifs") == 0 ||
+            strcmp(fstype, "smb") == 0 ||
+            strcmp(fstype, "smb3") == 0 ||
+            strcmp(fstype, "fuse.sshfs") == 0 ||
+            strcmp(fstype, "fuse.rclone") == 0 ||
+            strcmp(fstype, "fuse.gvfsd-fuse") == 0 || // GVFS for cloud storage
+            strncmp(fstype, "fuse.", 5) == 0);        // Other FUSE-based network file systems
+}
+
+int is_appimage_or_temp(const char *fsname, const char *mountpoint)
+{
+    // Filter out AppImages and temporary mounts
+    return (strstr(fsname, ".AppImage") != NULL ||
+            strstr(mountpoint, "/tmp/.mount_") != NULL ||
+            strstr(mountpoint, "/tmp/") != NULL);
 }
 
 // Helper for true-color gradient (red-yellow-green)
@@ -117,8 +172,187 @@ int max_visible_line_length(const char *lines[], int n)
     return max;
 }
 
-int main()
+// Function to check if a directory contains cloud storage
+int is_cloud_storage_directory(const char *path)
 {
+    DIR *dir = opendir(path);
+    if (!dir)
+        return 0;
+
+    struct dirent *entry;
+    int has_cloud_storage = 0;
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        // Use stat if d_type is not available
+        struct stat st;
+        char full_path[1024];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode) &&
+            (strstr(entry->d_name, "google-drive") != NULL ||
+             strstr(entry->d_name, "dropbox") != NULL ||
+             strstr(entry->d_name, "onedrive") != NULL ||
+             strstr(entry->d_name, "mega") != NULL))
+        {
+            has_cloud_storage = 1;
+            break;
+        }
+    }
+
+    closedir(dir);
+    return has_cloud_storage;
+}
+
+// Function to get cloud storage info from GVFS
+void get_cloud_storage_info(const char *gvfs_path, int *drive_count)
+{
+    DIR *dir = opendir(gvfs_path);
+    if (!dir)
+        return;
+
+    struct dirent *entry;
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        // Use stat if d_type is not available
+        struct stat st;
+        char full_path[1024];
+        snprintf(full_path, sizeof(full_path), "%s/%s", gvfs_path, entry->d_name);
+
+        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode) &&
+            (strstr(entry->d_name, "google-drive") != NULL ||
+             strstr(entry->d_name, "dropbox") != NULL ||
+             strstr(entry->d_name, "onedrive") != NULL ||
+             strstr(entry->d_name, "mega") != NULL))
+        {
+
+            // Get file system information
+            struct statvfs fs_info;
+            if (statvfs(full_path, &fs_info) != 0)
+            {
+                continue;
+            }
+
+            // Calculate sizes
+            unsigned long long total_bytes = (unsigned long long)fs_info.f_blocks * fs_info.f_frsize;
+            unsigned long long available_bytes = (unsigned long long)fs_info.f_bavail * fs_info.f_frsize;
+            unsigned long long used_bytes = total_bytes - available_bytes;
+
+            // Format sizes for output
+            char total_str[64], used_str[64], available_str[64];
+            format_bytes(total_bytes, total_str, sizeof(total_str));
+            format_bytes(used_bytes, used_str, sizeof(used_str));
+            format_bytes(available_bytes, available_str, sizeof(available_str));
+
+            // Target width calculation (same as before)
+            int terminal_width = get_terminal_width();
+            int box_width = terminal_width * 4 / 5;
+            if (box_width > 120)
+                box_width = 120;
+            if (box_width < 40)
+                box_width = 40;
+            int content_width = box_width - 4;
+            int bar_length = content_width - 2;
+            if (bar_length < 10)
+                bar_length = 10;
+
+            // Calculate usage
+            double usage_percent = calculate_usage_percent(total_bytes, available_bytes);
+            int filled_length = (int)((usage_percent / 100.0) * bar_length);
+            char percent_text[16];
+            snprintf(percent_text, sizeof(percent_text), "%.1f%%", usage_percent);
+            int text_length = strlen(percent_text);
+            int text_start = filled_length > text_length ? (filled_length - text_length) / 2 : 0;
+
+            // Create progress bar (same logic as before)
+            size_t bar_bufsize = bar_length * 64 + 1;
+            char *bar = malloc(bar_bufsize);
+            if (!bar)
+            {
+                perror("malloc");
+                continue;
+            }
+            bar[0] = '\0';
+            for (int i = 0; i < bar_length; i++)
+            {
+                if (i >= text_start && i < text_start + text_length && i < filled_length)
+                {
+                    get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
+                    int r, g, b;
+                    sscanf(colorbuf, "\033[38;2;%d;%d;%dm", &r, &g, &b);
+                    char tmp[128];
+                    snprintf(tmp, sizeof(tmp), "\033[48;2;%d;%d;%dm\033[38;2;0;0;255m%c\033[0m", r, g, b, percent_text[i - text_start]);
+                    strncat(bar, tmp, bar_bufsize - strlen(bar) - 1);
+                }
+                else if (i < filled_length)
+                {
+                    get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
+                    strncat(bar, colorbuf, bar_bufsize - strlen(bar) - 1);
+                    strncat(bar, "█\033[0m", bar_bufsize - strlen(bar) - 1);
+                }
+                else
+                {
+                    strncat(bar, "\033[48;2;64;64;64m\033[38;2;160;160;160m░\033[0m", bar_bufsize - strlen(bar) - 1);
+                }
+            }
+
+            // Determine cloud service name
+            const char *service_name = "Cloud Storage";
+            if (strstr(entry->d_name, "google-drive") != NULL)
+            {
+                service_name = "Google Drive";
+            }
+            else if (strstr(entry->d_name, "dropbox") != NULL)
+            {
+                service_name = "Dropbox";
+            }
+            else if (strstr(entry->d_name, "onedrive") != NULL)
+            {
+                service_name = "OneDrive";
+            }
+            else if (strstr(entry->d_name, "mega") != NULL)
+            {
+                service_name = "MEGA";
+            }
+
+            // Output
+            printf("  \033[1;33mNetwork Drive %d (%s)\033[0m\n", *drive_count + 1, service_name);
+            printf("  Mount point:   %s\n", full_path);
+            printf("  Filesystem:    %s\n", "fuse.gvfsd-fuse");
+            printf("  Device:        %s\n", entry->d_name);
+            printf("  Total size:    %s\n", total_str);
+            printf("  Used:          %s\n", used_str);
+            printf("  Available:     %s\n", available_str);
+
+            int bar_visible_len = visible_length(bar);
+            int bar_padding = content_width - bar_visible_len;
+            printf("  %s%*s\n", bar, bar_padding, "");
+
+            free(bar);
+            (*drive_count)++;
+        }
+    }
+
+    closedir(dir);
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc > 1)
+    {
+        if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)
+        {
+            show_help(argv[0]);
+            return 0;
+        }
+        else if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0)
+        {
+            show_version();
+            return 0;
+        }
+    }
+
     printf("\n");
     // Open the mount table
     FILE *mtab = setmntent("/proc/mounts", "r");
@@ -155,8 +389,16 @@ int main()
         {
             continue;
         }
-        // Only show physical drives
-        if (!is_physical_device(entry->mnt_fsname))
+        // Show physical drives and network drives
+        if (!is_physical_device(entry->mnt_fsname) &&
+            !is_network_device(entry->mnt_fsname) &&
+            !is_network_filesystem(entry->mnt_type))
+        {
+            continue;
+        }
+
+        // Skip AppImages and temporary mounts
+        if (is_appimage_or_temp(entry->mnt_fsname, entry->mnt_dir))
         {
             continue;
         }
@@ -242,7 +484,20 @@ int main()
         snprintf(barline, barline_bufsize, "[%-*s]", bar_length, ""); // for padding
 
         // Content
-        printf("  \033[1;33mDrive %d\033[0m\n", drive_count + 1);
+        const char *drive_type;
+        if (is_physical_device(entry->mnt_fsname))
+        {
+            drive_type = "Physical Drive";
+        }
+        else if (is_network_filesystem(entry->mnt_type) || is_network_device(entry->mnt_fsname))
+        {
+            drive_type = "Network Drive";
+        }
+        else
+        {
+            drive_type = "Other Drive";
+        }
+        printf("  \033[1;33m%s %d\033[0m\n", drive_type, drive_count + 1);
         printf("  Mount point:   %s\n", entry->mnt_dir);
         printf("  Filesystem:    %s\n", entry->mnt_type);
         printf("  Device:        %s\n", entry->mnt_fsname);
@@ -260,6 +515,14 @@ int main()
     }
 
     endmntent(mtab);
+
+    // Check for GVFS-based cloud storage
+    char gvfs_path[256];
+    snprintf(gvfs_path, sizeof(gvfs_path), "/run/user/%d/gvfs", getuid());
+    if (is_cloud_storage_directory(gvfs_path))
+    {
+        get_cloud_storage_info(gvfs_path, &drive_count);
+    }
 
     if (drive_count == 0)
     {
