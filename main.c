@@ -14,7 +14,7 @@
 
 // Constants for terminal and display
 #define TERM_FALLBACK_WIDTH 80
-#define VERSION "1.0.0"
+#define VERSION "1.0.1"
 #define COLOR_BUFFER_SIZE 32
 #define MAX_UNITS 5
 #define BYTES_PER_KB 1024.0
@@ -39,7 +39,7 @@
 #define BARLINE_BUFFER_EXTRA 16
 
 // Constants for terminal width calculations
-#define TERMINAL_WIDTH_PERCENTAGE 80
+#define TERMINAL_WIDTH_PERCENTAGE 4
 #define TERMINAL_WIDTH_DIVISOR 5
 #define MAX_BOX_WIDTH 120
 #define MIN_BOX_WIDTH 40
