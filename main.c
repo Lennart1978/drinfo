@@ -546,7 +546,7 @@ int main(int argc, char *argv[])
         const char *drive_type;
         if (is_physical_device(entry->mnt_fsname))
         {
-            drive_type = "Physical Drive";
+            drive_type = "Local Drive";
         }
         else if (is_network_filesystem(entry->mnt_type) || is_network_device(entry->mnt_fsname))
         {
