@@ -14,7 +14,7 @@
 
 // Constants for terminal and display
 #define TERM_FALLBACK_WIDTH 80
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 #define COLOR_BUFFER_SIZE 32
 #define MAX_UNITS 5
 #define BYTES_PER_KB 1024.0
