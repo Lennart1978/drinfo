@@ -12,7 +12,8 @@ clean:
 	rm -f $(TARGET)
 
 install: $(TARGET)
-	sudo cp $(TARGET) /usr/local/bin/
+	install -Dm755 drinfo /usr/local/bin/drinfo
+	install -Dm644 drinfo.1 /usr/share/man/man1/drinfo.1
 
 uninstall:
 	sudo rm -f /usr/local/bin/$(TARGET)

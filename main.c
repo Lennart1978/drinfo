@@ -11,6 +11,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <stdbool.h>
 
 // Constants for terminal and display
 #define TERM_FALLBACK_WIDTH 80
@@ -77,6 +78,12 @@
 // Maximum number of drives to handle
 #define MAX_DRIVES 100
 
+// Constants for file system types to skip
+const char *skip_filesystems[] = {
+    "proc", "sysfs", "devpts", "tmpfs", "devtmpfs", "securityfs",
+    "cgroup", "cgroup2", "pstore", "efivarfs", "autofs", "debugfs",
+    "tracefs", "configfs", "fusectl", "fuse.gvfsd-fuse", "binfmt_misc"};
+
 // Structure to hold drive information
 typedef struct
 {
@@ -92,7 +99,7 @@ typedef struct
     double usage_percent;
     const char *drive_type;
     char *progress_bar;
-    int is_cloud_storage;
+    bool is_cloud_storage;
     char cloud_service_name[MAX_SIZE_STR_LENGTH];
 } drive_info_t;
 
@@ -175,7 +182,7 @@ double calculate_usage_percent(unsigned long long total, unsigned long long avai
     return ((double)used / total) * PERCENTAGE_MULTIPLIER;
 }
 
-int is_physical_device(const char *fsname)
+bool is_physical_device(const char *fsname)
 {
     // Check for /dev/sd*, /dev/nvme*, /dev/hd*
     return (strncmp(fsname, "/dev/sd", DEV_SD_PREFIX_LEN) == 0 ||
@@ -183,7 +190,7 @@ int is_physical_device(const char *fsname)
             strncmp(fsname, "/dev/hd", DEV_HD_PREFIX_LEN) == 0);
 }
 
-int is_network_device(const char *fsname)
+bool is_network_device(const char *fsname)
 {
     // Check for network file systems
     return (strncmp(fsname, "//", NETWORK_PATH_PREFIX_LEN) == 0 ||   // SMB/CIFS shares
@@ -191,7 +198,7 @@ int is_network_device(const char *fsname)
             strstr(fsname, ":") != NULL);                            // NFS and other network protocols
 }
 
-int is_network_filesystem(const char *fstype)
+bool is_network_filesystem(const char *fstype)
 {
     // Check for network file system types
     return (strcmp(fstype, "nfs") == 0 ||
@@ -205,7 +212,7 @@ int is_network_filesystem(const char *fstype)
             strncmp(fstype, "fuse.", FUSE_PREFIX_LEN) == 0); // Other FUSE-based network file systems
 }
 
-int is_appimage_or_temp(const char *fsname, const char *mountpoint)
+bool is_appimage_or_temp(const char *fsname, const char *mountpoint)
 {
     // Filter out AppImages and temporary mounts
     return (strstr(fsname, ".AppImage") != NULL ||
@@ -267,14 +274,14 @@ int max_visible_line_length(const char *lines[], int n)
 }
 
 // Function to check if a directory contains cloud storage
-int is_cloud_storage_directory(const char *path)
+bool is_cloud_storage_directory(const char *path)
 {
     DIR *dir = opendir(path);
     if (!dir)
-        return 0;
+        return false;
 
     struct dirent *entry;
-    int has_cloud_storage = 0;
+    bool has_cloud_storage = false;
 
     while ((entry = readdir(dir)) != NULL)
     {
@@ -289,13 +296,57 @@ int is_cloud_storage_directory(const char *path)
              strstr(entry->d_name, "onedrive") != NULL ||
              strstr(entry->d_name, "mega") != NULL))
         {
-            has_cloud_storage = 1;
+            has_cloud_storage = true;
             break;
         }
     }
 
     closedir(dir);
     return has_cloud_storage;
+}
+
+// Function to fill drive_info_t structure with common data
+void fill_drive_info(drive_info_t *drive,
+                     const char *mount_point,
+                     const char *filesystem,
+                     const char *device,
+                     const char *total_str,
+                     const char *used_str,
+                     const char *available_str,
+                     unsigned long long total_bytes,
+                     unsigned long long used_bytes,
+                     unsigned long long available_bytes,
+                     double usage_percent,
+                     const char *drive_type,
+                     char *progress_bar,
+                     bool is_cloud_storage,
+                     const char *cloud_service_name)
+{
+    strncpy(drive->mount_point, mount_point, sizeof(drive->mount_point) - 1);
+    drive->mount_point[sizeof(drive->mount_point) - 1] = '\0';
+    strncpy(drive->filesystem, filesystem, sizeof(drive->filesystem) - 1);
+    drive->filesystem[sizeof(drive->filesystem) - 1] = '\0';
+    strncpy(drive->device, device, sizeof(drive->device) - 1);
+    drive->device[sizeof(drive->device) - 1] = '\0';
+    snprintf(drive->total_str, sizeof(drive->total_str), "%s", total_str);
+    snprintf(drive->used_str, sizeof(drive->used_str), "%s", used_str);
+    snprintf(drive->available_str, sizeof(drive->available_str), "%s", available_str);
+    drive->total_bytes = total_bytes;
+    drive->used_bytes = used_bytes;
+    drive->available_bytes = available_bytes;
+    drive->usage_percent = usage_percent;
+    drive->drive_type = drive_type;
+    drive->progress_bar = progress_bar;
+    drive->is_cloud_storage = is_cloud_storage;
+    if (cloud_service_name)
+    {
+        strncpy(drive->cloud_service_name, cloud_service_name, sizeof(drive->cloud_service_name) - 1);
+        drive->cloud_service_name[sizeof(drive->cloud_service_name) - 1] = '\0';
+    }
+    else
+    {
+        drive->cloud_service_name[0] = '\0';
+    }
 }
 
 // Function to get cloud storage info from GVFS
@@ -412,24 +463,10 @@ void get_cloud_storage_info(const char *gvfs_path, drive_info_t *drives, int *dr
 
             // Store information in drive_info_t structure
             drive_info_t *drive = &drives[*drive_count];
-            strncpy(drive->mount_point, full_path, sizeof(drive->mount_point) - 1);
-            drive->mount_point[sizeof(drive->mount_point) - 1] = '\0';
-            strncpy(drive->filesystem, "fuse.gvfsd-fuse", sizeof(drive->filesystem) - 1);
-            drive->filesystem[sizeof(drive->filesystem) - 1] = '\0';
-            strncpy(drive->device, entry->d_name, sizeof(drive->device) - 1);
-            drive->device[sizeof(drive->device) - 1] = '\0';
-            snprintf(drive->total_str, sizeof(drive->total_str), "%s", total_str);
-            snprintf(drive->used_str, sizeof(drive->used_str), "%s", used_str);
-            snprintf(drive->available_str, sizeof(drive->available_str), "%s", available_str);
-            drive->total_bytes = total_bytes;
-            drive->used_bytes = used_bytes;
-            drive->available_bytes = available_bytes;
-            drive->usage_percent = usage_percent;
-            drive->drive_type = "Network Drive";
-            drive->progress_bar = bar;
-            drive->is_cloud_storage = 1;
-            strncpy(drive->cloud_service_name, service_name, sizeof(drive->cloud_service_name) - 1);
-            drive->cloud_service_name[sizeof(drive->cloud_service_name) - 1] = '\0';
+            fill_drive_info(drive, full_path, "fuse.gvfsd-fuse", entry->d_name,
+                            total_str, used_str, available_str,
+                            total_bytes, used_bytes, available_bytes,
+                            usage_percent, "Network Drive", bar, true, service_name);
 
             (*drive_count)++;
         }
@@ -474,26 +511,23 @@ int main(int argc, char *argv[])
     while ((entry = getmntent(mtab)) != NULL && drive_count < MAX_DRIVES)
     {
         // Skip special file systems
-        if (strcmp(entry->mnt_type, "proc") == 0 ||
-            strcmp(entry->mnt_type, "sysfs") == 0 ||
-            strcmp(entry->mnt_type, "devpts") == 0 ||
-            strcmp(entry->mnt_type, "tmpfs") == 0 ||
-            strcmp(entry->mnt_type, "devtmpfs") == 0 ||
-            strcmp(entry->mnt_type, "securityfs") == 0 ||
-            strcmp(entry->mnt_type, "cgroup") == 0 ||
-            strcmp(entry->mnt_type, "cgroup2") == 0 ||
-            strcmp(entry->mnt_type, "pstore") == 0 ||
-            strcmp(entry->mnt_type, "efivarfs") == 0 ||
-            strcmp(entry->mnt_type, "autofs") == 0 ||
-            strcmp(entry->mnt_type, "debugfs") == 0 ||
-            strcmp(entry->mnt_type, "tracefs") == 0 ||
-            strcmp(entry->mnt_type, "configfs") == 0 ||
-            strcmp(entry->mnt_type, "fusectl") == 0 ||
-            strcmp(entry->mnt_type, "fuse.gvfsd-fuse") == 0 ||
-            strcmp(entry->mnt_type, "binfmt_misc") == 0)
+        const int skip_count = sizeof(skip_filesystems) / sizeof(skip_filesystems[0]);
+
+        bool should_skip = false;
+        for (int i = 0; i < skip_count; i++)
+        {
+            if (strcmp(entry->mnt_type, skip_filesystems[i]) == 0)
+            {
+                should_skip = true;
+                break;
+            }
+        }
+
+        if (should_skip)
         {
             continue;
         }
+
         // Show physical drives and network drives
         if (!is_physical_device(entry->mnt_fsname) &&
             !is_network_device(entry->mnt_fsname) &&
@@ -595,23 +629,10 @@ int main(int argc, char *argv[])
 
         // Store information in drive_info_t structure
         drive_info_t *drive = &drives[drive_count];
-        strncpy(drive->mount_point, entry->mnt_dir, sizeof(drive->mount_point) - 1);
-        drive->mount_point[sizeof(drive->mount_point) - 1] = '\0';
-        strncpy(drive->filesystem, entry->mnt_type, sizeof(drive->filesystem) - 1);
-        drive->filesystem[sizeof(drive->filesystem) - 1] = '\0';
-        strncpy(drive->device, entry->mnt_fsname, sizeof(drive->device) - 1);
-        drive->device[sizeof(drive->device) - 1] = '\0';
-        snprintf(drive->total_str, sizeof(drive->total_str), "%s", total_str);
-        snprintf(drive->used_str, sizeof(drive->used_str), "%s", used_str);
-        snprintf(drive->available_str, sizeof(drive->available_str), "%s", available_str);
-        drive->total_bytes = total_bytes;
-        drive->used_bytes = used_bytes;
-        drive->available_bytes = available_bytes;
-        drive->usage_percent = usage_percent;
-        drive->drive_type = drive_type;
-        drive->progress_bar = bar;
-        drive->is_cloud_storage = 0;
-        drive->cloud_service_name[0] = '\0';
+        fill_drive_info(drive, entry->mnt_dir, entry->mnt_type, entry->mnt_fsname,
+                        total_str, used_str, available_str,
+                        total_bytes, used_bytes, available_bytes,
+                        usage_percent, drive_type, bar, false, NULL);
 
         drive_count++;
     }
