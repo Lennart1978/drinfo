@@ -12,10 +12,12 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <stdbool.h>
+#include <errno.h>
+#include <sys/types.h>
 
 // Constants for terminal and display
 #define TERM_FALLBACK_WIDTH 80
-#define VERSION "1.0.2"
+#define VERSION "1.0.4"
 #define COLOR_BUFFER_SIZE 32
 #define MAX_UNITS 5
 #define BYTES_PER_KB 1024.0
@@ -82,7 +84,8 @@
 const char *skip_filesystems[] = {
     "proc", "sysfs", "devpts", "tmpfs", "devtmpfs", "securityfs",
     "cgroup", "cgroup2", "pstore", "efivarfs", "autofs", "debugfs",
-    "tracefs", "configfs", "fusectl", "fuse.gvfsd-fuse", "binfmt_misc"};
+    "tracefs", "configfs", "fusectl", "fuse.gvfsd-fuse", "binfmt_misc",
+    "fuse.portal"};
 
 // Structure to hold drive information
 typedef struct
@@ -90,6 +93,8 @@ typedef struct
     char mount_point[MAX_PATH_LENGTH];
     char filesystem[MAX_SIZE_STR_LENGTH];
     char device[MAX_PATH_LENGTH];
+    char uuid[128];
+    char label[128];
     char total_str[MAX_SIZE_STR_LENGTH];
     char used_str[MAX_SIZE_STR_LENGTH];
     char available_str[MAX_SIZE_STR_LENGTH];
@@ -101,6 +106,10 @@ typedef struct
     char *progress_bar;
     bool is_cloud_storage;
     char cloud_service_name[MAX_SIZE_STR_LENGTH];
+    char mount_options[MAX_TEMP_BUFFER_LENGTH];
+    unsigned long long total_inodes;
+    unsigned long long used_inodes;
+    double inode_usage;
 } drive_info_t;
 
 char colorbuf[COLOR_BUFFER_SIZE]; // For bar colors
@@ -310,6 +319,8 @@ void fill_drive_info(drive_info_t *drive,
                      const char *mount_point,
                      const char *filesystem,
                      const char *device,
+                     const char *uuid,
+                     const char *label,
                      const char *total_str,
                      const char *used_str,
                      const char *available_str,
@@ -320,7 +331,11 @@ void fill_drive_info(drive_info_t *drive,
                      const char *drive_type,
                      char *progress_bar,
                      bool is_cloud_storage,
-                     const char *cloud_service_name)
+                     const char *cloud_service_name,
+                     const char *mount_options,
+                     unsigned long long total_inodes,
+                     unsigned long long used_inodes,
+                     double inode_usage)
 {
     strncpy(drive->mount_point, mount_point, sizeof(drive->mount_point) - 1);
     drive->mount_point[sizeof(drive->mount_point) - 1] = '\0';
@@ -328,6 +343,24 @@ void fill_drive_info(drive_info_t *drive,
     drive->filesystem[sizeof(drive->filesystem) - 1] = '\0';
     strncpy(drive->device, device, sizeof(drive->device) - 1);
     drive->device[sizeof(drive->device) - 1] = '\0';
+    if (uuid)
+    {
+        strncpy(drive->uuid, uuid, sizeof(drive->uuid) - 1);
+        drive->uuid[sizeof(drive->uuid) - 1] = '\0';
+    }
+    else
+    {
+        drive->uuid[0] = '\0';
+    }
+    if (label)
+    {
+        strncpy(drive->label, label, sizeof(drive->label) - 1);
+        drive->label[sizeof(drive->label) - 1] = '\0';
+    }
+    else
+    {
+        drive->label[0] = '\0';
+    }
     snprintf(drive->total_str, sizeof(drive->total_str), "%s", total_str);
     snprintf(drive->used_str, sizeof(drive->used_str), "%s", used_str);
     snprintf(drive->available_str, sizeof(drive->available_str), "%s", available_str);
@@ -347,6 +380,18 @@ void fill_drive_info(drive_info_t *drive,
     {
         drive->cloud_service_name[0] = '\0';
     }
+    if (mount_options)
+    {
+        strncpy(drive->mount_options, mount_options, sizeof(drive->mount_options) - 1);
+        drive->mount_options[sizeof(drive->mount_options) - 1] = '\0';
+    }
+    else
+    {
+        drive->mount_options[0] = '\0';
+    }
+    drive->total_inodes = total_inodes;
+    drive->used_inodes = used_inodes;
+    drive->inode_usage = inode_usage;
 }
 
 // Function to get cloud storage info from GVFS
@@ -464,15 +509,145 @@ void get_cloud_storage_info(const char *gvfs_path, drive_info_t *drives, int *dr
             // Store information in drive_info_t structure
             drive_info_t *drive = &drives[*drive_count];
             fill_drive_info(drive, full_path, "fuse.gvfsd-fuse", entry->d_name,
+                            NULL, NULL,
                             total_str, used_str, available_str,
                             total_bytes, used_bytes, available_bytes,
-                            usage_percent, "Network Drive", bar, true, service_name);
+                            usage_percent, "Network Drive", bar, true, service_name, NULL,
+                            (unsigned long long)fs_info.f_blocks, (unsigned long long)fs_info.f_files,
+                            (double)fs_info.f_files / (double)fs_info.f_blocks);
 
             (*drive_count)++;
         }
     }
 
     closedir(dir);
+}
+
+void get_uuid_and_label(const char *device, char *uuid, size_t uuid_size, char *label, size_t label_size)
+{
+    uuid[0] = '\0';
+    label[0] = '\0';
+
+    char resolved_device[PATH_MAX];
+    if (!realpath(device, resolved_device))
+    {
+        // Wenn das Gerät nicht auflösbar ist, abbrechen
+        return;
+    }
+
+    // UUID suchen
+    DIR *uuid_dir = opendir("/dev/disk/by-uuid/");
+    if (uuid_dir)
+    {
+        struct dirent *entry;
+        char full_path[PATH_MAX];
+        char resolved_link[PATH_MAX];
+        while ((entry = readdir(uuid_dir)) != NULL)
+        {
+            if (entry->d_name[0] == '.')
+                continue;
+            snprintf(full_path, sizeof(full_path), "/dev/disk/by-uuid/%s", entry->d_name);
+            if (realpath(full_path, resolved_link))
+            {
+                if (strcmp(resolved_link, resolved_device) == 0)
+                {
+                    strncpy(uuid, entry->d_name, uuid_size - 1);
+                    uuid[uuid_size - 1] = '\0';
+                    break;
+                }
+            }
+        }
+        closedir(uuid_dir);
+    }
+
+    // Label suchen
+    DIR *label_dir = opendir("/dev/disk/by-label/");
+    if (label_dir)
+    {
+        struct dirent *entry;
+        char full_path[PATH_MAX];
+        char resolved_link[PATH_MAX];
+        while ((entry = readdir(label_dir)) != NULL)
+        {
+            if (entry->d_name[0] == '.')
+                continue;
+            snprintf(full_path, sizeof(full_path), "/dev/disk/by-label/%s", entry->d_name);
+            if (realpath(full_path, resolved_link))
+            {
+                if (strcmp(resolved_link, resolved_device) == 0)
+                {
+                    strncpy(label, entry->d_name, label_size - 1);
+                    label[label_size - 1] = '\0';
+                    break;
+                }
+            }
+        }
+        closedir(label_dir);
+    }
+}
+
+// Helper function: Query SMART status (only for root and physical devices)
+void get_smart_status(const char *device, char *status, size_t status_size)
+{
+    status[0] = '\0';
+    if (geteuid() != 0)
+        return;
+    // Allow all /dev/sd*, /dev/nvme*, /dev/hd* (including partitions)
+    if (!(
+            strncmp(device, "/dev/sd", 7) == 0 ||
+            strncmp(device, "/dev/nvme", 9) == 0 ||
+            strncmp(device, "/dev/hd", 7) == 0))
+        return;
+
+    char cmd[256], line[256];
+    snprintf(cmd, sizeof(cmd), "smartctl -H %s 2>/dev/null", device);
+    FILE *fp = popen(cmd, "r");
+    if (!fp)
+        return;
+    while (fgets(line, sizeof(line), fp))
+    {
+        if (strstr(line, "SMART overall-health self-assessment test result") || strstr(line, "SMART Health Status"))
+        {
+            char *p = strchr(line, ':');
+            if (p)
+            {
+                p++;
+                while (*p == ' ' || *p == '\t')
+                    p++;
+                strncpy(status, p, status_size - 1);
+                status[status_size - 1] = '\0';
+                char *nl = strchr(status, '\n');
+                if (nl)
+                    *nl = '\0';
+                break;
+            }
+        }
+        if (strstr(line, "PASSED"))
+        {
+            strncpy(status, "PASSED", status_size - 1);
+            status[status_size - 1] = '\0';
+            break;
+        }
+        if (strstr(line, "FAILED"))
+        {
+            strncpy(status, "FAILED", status_size - 1);
+            status[status_size - 1] = '\0';
+            break;
+        }
+        if (strstr(line, "UNKNOWN"))
+        {
+            strncpy(status, "UNKNOWN", status_size - 1);
+            status[status_size - 1] = '\0';
+            break;
+        }
+        if (strstr(line, "NOT AVAILABLE"))
+        {
+            strncpy(status, "NOT AVAILABLE", status_size - 1);
+            status[status_size - 1] = '\0';
+            break;
+        }
+    }
+    pclose(fp);
 }
 
 int main(int argc, char *argv[])
@@ -560,6 +735,12 @@ int main(int argc, char *argv[])
         format_bytes(used_bytes, used_str, sizeof(used_str));
         format_bytes(available_bytes, available_str, sizeof(available_str));
 
+        // Inode-Infos
+        unsigned long long total_inodes = fs_info.f_files;
+        unsigned long long free_inodes = fs_info.f_favail;
+        unsigned long long used_inodes = total_inodes > 0 ? total_inodes - free_inodes : 0;
+        double inode_usage = (total_inodes > 0) ? ((double)used_inodes / total_inodes) * 100.0 : 0.0;
+
         // Target width: 80% of terminal width or max. 120 characters
         int terminal_width = get_terminal_width();
         int box_width = terminal_width * TERMINAL_WIDTH_PERCENTAGE / TERMINAL_WIDTH_DIVISOR;
@@ -627,12 +808,18 @@ int main(int argc, char *argv[])
             drive_type = "Other Drive";
         }
 
+        // UUID und Label ermitteln
+        char uuid[128], label[128];
+        get_uuid_and_label(entry->mnt_fsname, uuid, sizeof(uuid), label, sizeof(label));
+
         // Store information in drive_info_t structure
         drive_info_t *drive = &drives[drive_count];
         fill_drive_info(drive, entry->mnt_dir, entry->mnt_type, entry->mnt_fsname,
+                        uuid, label,
                         total_str, used_str, available_str,
                         total_bytes, used_bytes, available_bytes,
-                        usage_percent, drive_type, bar, false, NULL);
+                        usage_percent, drive_type, bar, false, NULL, entry->mnt_opts,
+                        total_inodes, used_inodes, inode_usage);
 
         drive_count++;
     }
@@ -667,9 +854,28 @@ int main(int argc, char *argv[])
         printf("  Mount point:   %s\n", drive->mount_point);
         printf("  Filesystem:    %s\n", drive->filesystem);
         printf("  Device:        %s\n", drive->device);
+        printf("  UUID:          %s\n", drive->uuid[0] ? drive->uuid : "-");
+        printf("  Label:         %s\n", drive->label[0] ? drive->label : "-");
+        printf("  Mount options: %s\n", drive->mount_options);
         printf("  Total size:    %s\n", drive->total_str);
         printf("  Used:          %s\n", drive->used_str);
         printf("  Available:     %s\n", drive->available_str);
+        printf("  Inodes:        %llu/%llu (%.1f%% used)\n", drive->used_inodes, drive->total_inodes, drive->inode_usage);
+
+        // SMART status only for root and physical devices
+        if (geteuid() == 0 && !drive->is_cloud_storage && strcmp(drive->drive_type, "Local Drive") == 0)
+        {
+            char smart_status[128];
+            get_smart_status(drive->device, smart_status, sizeof(smart_status));
+            if (smart_status[0])
+            {
+                printf("  SMART:         %s\n", smart_status);
+            }
+            else
+            {
+                printf("  SMART:         No data\n");
+            }
+        }
 
         // Progress bar
         int terminal_width = get_terminal_width();
