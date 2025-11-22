@@ -1,4 +1,4 @@
-.TH DRINFO 1 "June 2024" "Version 1.0.4" "User Commands"
+.TH DRINFO 1 "November 2025" "Version 1.2.0" "User Commands"
 .SH NAME
 drinfo \- display information about drives and their storage usage
 .SH SYNOPSIS
@@ -6,9 +6,10 @@ drinfo \- display information about drives and their storage usage
 .RI [ OPTION ]
 .SH DESCRIPTION
 .B drinfo
-lists all detected local and network drives and Shows mount point, filesystem type, device path,
+lists all detected local and network drives and shows mount point, filesystem type, device path,
 UUID, label, mount options, used, available and inodes + SMART status (only as root).
-
+.P
+It provides a visual representation of disk usage with gradient colored progress bars (green -> yellow -> red).
 .SH OPTIONS
 .TP
 .BR -h , --help
@@ -16,6 +17,29 @@ Show help message and exit.
 .TP
 .BR -v , --version
 Show program version and exit.
+.TP
+.BR -j , --json
+Output drive information in JSON format. This is useful for parsing the output in scripts or other programs.
+.TP
+.BR -n , --no-color
+Disable ANSI color codes in the output. Use this option when redirecting output to a file or when running in a terminal that does not support colors.
+.TP
+.BR -s , --sort \ \fITYPE\fP
+Sort the drives by the specified \fITYPE\fP. Available types are:
+.RS
+.TP
+.B size
+Sort by total size (descending). This is the default.
+.TP
+.B usage
+Sort by usage percentage (descending).
+.TP
+.B mount
+Sort alphabetically by mount point.
+.TP
+.B name
+Sort alphabetically by device name.
+.RE
 
 .SH AUTHOR
 Lennart Martens <monkeynator78@gmail.com>

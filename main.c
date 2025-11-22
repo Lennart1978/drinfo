@@ -14,10 +14,11 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <getopt.h>
 
 // Constants for terminal and display
 #define TERM_FALLBACK_WIDTH 80
-#define VERSION "1.0.4"
+#define VERSION "1.2.0"
 #define COLOR_BUFFER_SIZE 32
 #define MAX_UNITS 5
 #define BYTES_PER_KB 1024.0
@@ -70,8 +71,6 @@
 #define BACKGROUND_COLOR_FORMAT "\033[48;2;%d;%d;%dm"
 #define BLUE_TEXT_FORMAT "\033[38;2;%d;%d;%dm"
 #define RESET_FORMAT "\033[0m"
-#define BOLD_YELLOW_FORMAT "\033[1;33m"
-#define RESET_COLOR_FORMAT "\033[0m"
 
 // Constants for file system types
 #define MOUNT_TABLE_PATH "/proc/mounts"
@@ -79,6 +78,15 @@
 
 // Maximum number of drives to handle
 #define MAX_DRIVES 100
+
+// Global options
+bool opt_json = false;
+bool opt_no_color = false;
+enum { SORT_SIZE, SORT_USAGE, SORT_MOUNT, SORT_NAME } opt_sort = SORT_SIZE;
+
+// Color strings (can be disabled)
+const char *c_bold_yellow = "\033[1;33m";
+const char *c_reset = "\033[0m";
 
 // Constants for file system types to skip
 const char *skip_filesystems[] = {
@@ -127,6 +135,35 @@ int compare_drives_by_capacity(const void *a, const void *b)
     return 0;
 }
 
+// Function to compare drives by usage (descending order)
+int compare_drives_by_usage(const void *a, const void *b)
+{
+    const drive_info_t *drive_a = (const drive_info_t *)a;
+    const drive_info_t *drive_b = (const drive_info_t *)b;
+
+    if (drive_b->usage_percent > drive_a->usage_percent)
+        return 1;
+    if (drive_b->usage_percent < drive_a->usage_percent)
+        return -1;
+    return 0;
+}
+
+// Function to compare drives by mount point (alphabetical)
+int compare_drives_by_mount(const void *a, const void *b)
+{
+    const drive_info_t *drive_a = (const drive_info_t *)a;
+    const drive_info_t *drive_b = (const drive_info_t *)b;
+    return strcmp(drive_a->mount_point, drive_b->mount_point);
+}
+
+// Function to compare drives by device name (alphabetical)
+int compare_drives_by_name(const void *a, const void *b)
+{
+    const drive_info_t *drive_a = (const drive_info_t *)a;
+    const drive_info_t *drive_b = (const drive_info_t *)b;
+    return strcmp(drive_a->device, drive_b->device);
+}
+
 // Function to display help text
 void show_help(const char *program_name)
 {
@@ -135,8 +172,11 @@ void show_help(const char *program_name)
     printf("Display information about available drives and their storage space.\n");
     printf("\n");
     printf("Options:\n");
-    printf("  -h, --help     Show this help message\n");
-    printf("  -v, --version  Show program version\n");
+    printf("  -h, --help       Show this help message\n");
+    printf("  -v, --version    Show program version\n");
+    printf("  -j, --json       Output in JSON format\n");
+    printf("  -n, --no-color   Disable color output\n");
+    printf("  -s, --sort TYPE  Sort drives by TYPE (size, usage, mount, name)\n");
     printf("\n");
     printf("This program is licensed under the MIT License.\n");
     printf("https://github.com/lennart1978/drinfo\n");
@@ -232,6 +272,11 @@ bool is_appimage_or_temp(const char *fsname, const char *mountpoint)
 // Helper for true-color gradient (red-yellow-green)
 void get_bar_color(int idx, int max, char *buffer, size_t size)
 {
+    if (opt_no_color) {
+        buffer[0] = '\0';
+        return;
+    }
+
     // New gradient: 0% = green (0,255,0), 50% = yellow (255,255,0), 100% = red (255,0,0)
     float ratio = (float)idx / (float)(max - 1);
     int r, g, b;
@@ -267,19 +312,6 @@ int visible_length(const char *s)
             len++;
     }
     return len;
-}
-
-// Adjusted: calculate max visible line length for block
-int max_visible_line_length(const char *lines[], int n)
-{
-    int max = 0;
-    for (int i = 0; i < n; ++i)
-    {
-        int len = visible_length(lines[i]);
-        if (len > max)
-            max = len;
-    }
-    return max;
 }
 
 // Function to check if a directory contains cloud storage
@@ -455,7 +487,7 @@ void get_cloud_storage_info(const char *gvfs_path, drive_info_t *drives, int *dr
             int text_length = strlen(percent_text);
             int text_start = filled_length > text_length ? (filled_length - text_length) / 2 : 0;
 
-            // Create progress bar (same logic as before)
+            // Create progress bar
             size_t bar_bufsize = bar_length * MAX_BAR_BUFFER_MULTIPLIER + 1;
             char *bar = malloc(bar_bufsize);
             if (!bar)
@@ -468,22 +500,35 @@ void get_cloud_storage_info(const char *gvfs_path, drive_info_t *drives, int *dr
             {
                 if (i >= text_start && i < text_start + text_length && i < filled_length)
                 {
-                    get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
-                    int r, g, b;
-                    sscanf(colorbuf, COLOR_FORMAT, &r, &g, &b);
-                    char tmp[MAX_TEMP_BUFFER_LENGTH];
-                    snprintf(tmp, sizeof(tmp), BACKGROUND_COLOR_FORMAT BLUE_TEXT_FORMAT "%c" RESET_FORMAT, r, g, b, BLUE_TEXT_R, BLUE_TEXT_G, BLUE_TEXT_B, percent_text[i - text_start]);
-                    strncat(bar, tmp, bar_bufsize - strlen(bar) - 1);
+                    if (!opt_no_color) {
+                        get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
+                        int r, g, b;
+                        sscanf(colorbuf, COLOR_FORMAT, &r, &g, &b);
+                        char tmp[MAX_TEMP_BUFFER_LENGTH];
+                        snprintf(tmp, sizeof(tmp), BACKGROUND_COLOR_FORMAT BLUE_TEXT_FORMAT "%c" RESET_FORMAT, r, g, b, BLUE_TEXT_R, BLUE_TEXT_G, BLUE_TEXT_B, percent_text[i - text_start]);
+                        strncat(bar, tmp, bar_bufsize - strlen(bar) - 1);
+                    } else {
+                        char tmp[2] = {percent_text[i - text_start], '\0'};
+                        strncat(bar, tmp, bar_bufsize - strlen(bar) - 1);
+                    }
                 }
                 else if (i < filled_length)
                 {
-                    get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
-                    strncat(bar, colorbuf, bar_bufsize - strlen(bar) - 1);
-                    strncat(bar, "█" RESET_FORMAT, bar_bufsize - strlen(bar) - 1);
+                    if (!opt_no_color) {
+                        get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
+                        strncat(bar, colorbuf, bar_bufsize - strlen(bar) - 1);
+                        strncat(bar, "█" RESET_FORMAT, bar_bufsize - strlen(bar) - 1);
+                    } else {
+                        strncat(bar, "█", bar_bufsize - strlen(bar) - 1);
+                    }
                 }
                 else
                 {
-                    strncat(bar, "\033[48;2;64;64;64m\033[38;2;160;160;160m░\033[0m", bar_bufsize - strlen(bar) - 1);
+                    if (!opt_no_color) {
+                        strncat(bar, "\033[48;2;64;64;64m\033[38;2;160;160;160m░\033[0m", bar_bufsize - strlen(bar) - 1);
+                    } else {
+                        strncat(bar, "░", bar_bufsize - strlen(bar) - 1);
+                    }
                 }
             }
 
@@ -650,40 +695,48 @@ void get_smart_status(const char *device, char *status, size_t status_size)
     pclose(fp);
 }
 
-int main(int argc, char *argv[])
-{
-    if (argc > 1)
-    {
-        if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)
-        {
-            show_help(argv[0]);
-            return 0;
-        }
-        else if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0)
-        {
-            show_version();
-            return 0;
-        }
+void print_json(drive_info_t *drives, int count) {
+    printf("[\n");
+    for (int i = 0; i < count; i++) {
+        drive_info_t *d = &drives[i];
+        printf("  {\n");
+        printf("    \"device\": \"%s\",\n", d->device);
+        printf("    \"mount_point\": \"%s\",\n", d->mount_point);
+        printf("    \"filesystem\": \"%s\",\n", d->filesystem);
+        printf("    \"total_bytes\": %llu,\n", d->total_bytes);
+        printf("    \"used_bytes\": %llu,\n", d->used_bytes);
+        printf("    \"available_bytes\": %llu,\n", d->available_bytes);
+        printf("    \"usage_percent\": %.1f,\n", d->usage_percent);
+        printf("    \"type\": \"%s\",\n", d->drive_type);
+        printf("    \"is_cloud\": %s,\n", d->is_cloud_storage ? "true" : "false");
+        printf("    \"cloud_service\": \"%s\",\n", d->cloud_service_name);
+        printf("    \"uuid\": \"%s\",\n", d->uuid);
+        printf("    \"label\": \"%s\",\n", d->label);
+        printf("    \"mount_options\": \"%s\",\n", d->mount_options);
+        printf("    \"total_inodes\": %llu,\n", d->total_inodes);
+        printf("    \"used_inodes\": %llu,\n", d->used_inodes);
+        printf("    \"inode_usage\": %.1f\n", d->inode_usage);
+        if (i < count - 1) printf("  },\n");
+        else printf("  }\n");
     }
+    printf("]\n");
+}
 
-    printf("\n");
-
-    // Array to store all drive information
-    drive_info_t drives[MAX_DRIVES];
-    int drive_count = 0;
+void discover_drives(drive_info_t *drives, int *drive_count) {
+    *drive_count = 0;
 
     // Open the mount table
     FILE *mtab = setmntent(MOUNT_TABLE_PATH, "r");
     if (mtab == NULL)
     {
         perror("Error opening mount table");
-        return 1;
+        return;
     }
 
     struct mntent *entry;
 
     // Loop through all mount points and collect drive information
-    while ((entry = getmntent(mtab)) != NULL && drive_count < MAX_DRIVES)
+    while ((entry = getmntent(mtab)) != NULL && *drive_count < MAX_DRIVES)
     {
         // Skip special file systems
         const int skip_count = sizeof(skip_filesystems) / sizeof(skip_filesystems[0]);
@@ -774,22 +827,35 @@ int main(int argc, char *argv[])
         {
             if (i >= text_start && i < text_start + text_length && i < filled_length)
             {
-                get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
-                int r, g, b;
-                sscanf(colorbuf, COLOR_FORMAT, &r, &g, &b);
-                char tmp[MAX_TEMP_BUFFER_LENGTH];
-                snprintf(tmp, sizeof(tmp), BACKGROUND_COLOR_FORMAT BLUE_TEXT_FORMAT "%c" RESET_FORMAT, r, g, b, BLUE_TEXT_R, BLUE_TEXT_G, BLUE_TEXT_B, percent_text[i - text_start]);
-                strncat(bar, tmp, bar_bufsize - strlen(bar) - 1);
+                if (!opt_no_color) {
+                    get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
+                    int r, g, b;
+                    sscanf(colorbuf, COLOR_FORMAT, &r, &g, &b);
+                    char tmp[MAX_TEMP_BUFFER_LENGTH];
+                    snprintf(tmp, sizeof(tmp), BACKGROUND_COLOR_FORMAT BLUE_TEXT_FORMAT "%c" RESET_FORMAT, r, g, b, BLUE_TEXT_R, BLUE_TEXT_G, BLUE_TEXT_B, percent_text[i - text_start]);
+                    strncat(bar, tmp, bar_bufsize - strlen(bar) - 1);
+                } else {
+                    char tmp[2] = {percent_text[i - text_start], '\0'};
+                    strncat(bar, tmp, bar_bufsize - strlen(bar) - 1);
+                }
             }
             else if (i < filled_length)
             {
-                get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
-                strncat(bar, colorbuf, bar_bufsize - strlen(bar) - 1);
-                strncat(bar, "█" RESET_FORMAT, bar_bufsize - strlen(bar) - 1);
+                if (!opt_no_color) {
+                    get_bar_color(i, bar_length, colorbuf, sizeof(colorbuf));
+                    strncat(bar, colorbuf, bar_bufsize - strlen(bar) - 1);
+                    strncat(bar, "█" RESET_FORMAT, bar_bufsize - strlen(bar) - 1);
+                } else {
+                    strncat(bar, "█", bar_bufsize - strlen(bar) - 1);
+                }
             }
             else
             {
-                strncat(bar, "\033[48;2;64;64;64m\033[38;2;160;160;160m░\033[0m", bar_bufsize - strlen(bar) - 1);
+                if (!opt_no_color) {
+                    strncat(bar, "\033[48;2;64;64;64m\033[38;2;160;160;160m░\033[0m", bar_bufsize - strlen(bar) - 1);
+                } else {
+                    strncat(bar, "░", bar_bufsize - strlen(bar) - 1);
+                }
             }
         }
 
@@ -813,7 +879,7 @@ int main(int argc, char *argv[])
         get_uuid_and_label(entry->mnt_fsname, uuid, sizeof(uuid), label, sizeof(label));
 
         // Store information in drive_info_t structure
-        drive_info_t *drive = &drives[drive_count];
+        drive_info_t *drive = &drives[*drive_count];
         fill_drive_info(drive, entry->mnt_dir, entry->mnt_type, entry->mnt_fsname,
                         uuid, label,
                         total_str, used_str, available_str,
@@ -821,7 +887,7 @@ int main(int argc, char *argv[])
                         usage_percent, drive_type, bar, false, NULL, entry->mnt_opts,
                         total_inodes, used_inodes, inode_usage);
 
-        drive_count++;
+        (*drive_count)++;
     }
 
     endmntent(mtab);
@@ -831,76 +897,154 @@ int main(int argc, char *argv[])
     snprintf(gvfs_path, sizeof(gvfs_path), GVFS_BASE_PATH, getuid());
     if (is_cloud_storage_directory(gvfs_path))
     {
-        get_cloud_storage_info(gvfs_path, drives, &drive_count);
+        get_cloud_storage_info(gvfs_path, drives, drive_count);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    static struct option long_options[] = {
+        {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'v'},
+        {"json", no_argument, 0, 'j'},
+        {"no-color", no_argument, 0, 'n'},
+        {"sort", required_argument, 0, 's'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+
+    while ((opt = getopt_long(argc, argv, "hvjns:", long_options, &option_index)) != -1)
+    {
+        switch (opt)
+        {
+        case 'h':
+            show_help(argv[0]);
+            return 0;
+        case 'v':
+            show_version();
+            return 0;
+        case 'j':
+            opt_json = true;
+            break;
+        case 'n':
+            opt_no_color = true;
+            break;
+        case 's':
+            if (strcmp(optarg, "size") == 0) opt_sort = SORT_SIZE;
+            else if (strcmp(optarg, "usage") == 0) opt_sort = SORT_USAGE;
+            else if (strcmp(optarg, "mount") == 0) opt_sort = SORT_MOUNT;
+            else if (strcmp(optarg, "name") == 0) opt_sort = SORT_NAME;
+            else {
+                fprintf(stderr, "Invalid sort option: %s\n", optarg);
+                return 1;
+            }
+            break;
+        default:
+            return 1;
+        }
     }
 
-    // Sort drives by capacity (largest first)
-    qsort(drives, drive_count, sizeof(drive_info_t), compare_drives_by_capacity);
+    if (opt_no_color) {
+        c_bold_yellow = "";
+        c_reset = "";
+    }
 
-    // Display sorted drives
-    for (int i = 0; i < drive_count; i++)
-    {
-        drive_info_t *drive = &drives[i];
+    if (!opt_json) {
+        printf("\n");
+    }
 
-        // Display drive information
-        if (drive->is_cloud_storage)
-        {
-            printf("  " BOLD_YELLOW_FORMAT "Network Drive %d (%s)" RESET_COLOR_FORMAT "\n", i + 1, drive->cloud_service_name);
-        }
-        else
-        {
-            printf("  " BOLD_YELLOW_FORMAT "%s %d" RESET_COLOR_FORMAT "\n", drive->drive_type, i + 1);
-        }
-        printf("  Mount point:   %s\n", drive->mount_point);
-        printf("  Filesystem:    %s\n", drive->filesystem);
-        printf("  Device:        %s\n", drive->device);
-        printf("  UUID:          %s\n", drive->uuid[0] ? drive->uuid : "-");
-        printf("  Label:         %s\n", drive->label[0] ? drive->label : "-");
-        printf("  Mount options: %s\n", drive->mount_options);
-        printf("  Total size:    %s\n", drive->total_str);
-        printf("  Used:          %s\n", drive->used_str);
-        printf("  Available:     %s\n", drive->available_str);
-        printf("  Inodes:        %llu/%llu (%.1f%% used)\n", drive->used_inodes, drive->total_inodes, drive->inode_usage);
+    // Array to store all drive information
+    drive_info_t drives[MAX_DRIVES];
+    int drive_count = 0;
 
-        // SMART status only for root and physical devices
-        if (geteuid() == 0 && !drive->is_cloud_storage && strcmp(drive->drive_type, "Local Drive") == 0)
+    discover_drives(drives, &drive_count);
+
+    // Sort drives
+    switch (opt_sort) {
+        case SORT_SIZE:
+            qsort(drives, drive_count, sizeof(drive_info_t), compare_drives_by_capacity);
+            break;
+        case SORT_USAGE:
+            qsort(drives, drive_count, sizeof(drive_info_t), compare_drives_by_usage);
+            break;
+        case SORT_MOUNT:
+            qsort(drives, drive_count, sizeof(drive_info_t), compare_drives_by_mount);
+            break;
+        case SORT_NAME:
+            qsort(drives, drive_count, sizeof(drive_info_t), compare_drives_by_name);
+            break;
+    }
+
+    if (opt_json) {
+        print_json(drives, drive_count);
+    } else {
+        // Display sorted drives
+        for (int i = 0; i < drive_count; i++)
         {
-            char smart_status[128];
-            get_smart_status(drive->device, smart_status, sizeof(smart_status));
-            if (smart_status[0])
+            drive_info_t *drive = &drives[i];
+
+            // Display drive information
+            if (drive->is_cloud_storage)
             {
-                printf("  SMART:         %s\n", smart_status);
+                printf("  %sNetwork Drive %d (%s)%s\n", c_bold_yellow, i + 1, drive->cloud_service_name, c_reset);
             }
             else
             {
-                printf("  SMART:         No data\n");
+                printf("  %s%s %d%s\n", c_bold_yellow, drive->drive_type, i + 1, c_reset);
             }
+            printf("  Mount point:   %s\n", drive->mount_point);
+            printf("  Filesystem:    %s\n", drive->filesystem);
+            printf("  Device:        %s\n", drive->device);
+            printf("  UUID:          %s\n", drive->uuid[0] ? drive->uuid : "-");
+            printf("  Label:         %s\n", drive->label[0] ? drive->label : "-");
+            printf("  Mount options: %s\n", drive->mount_options);
+            printf("  Total size:    %s\n", drive->total_str);
+            printf("  Used:          %s\n", drive->used_str);
+            printf("  Available:     %s\n", drive->available_str);
+            printf("  Inodes:        %llu/%llu (%.1f%% used)\n", drive->used_inodes, drive->total_inodes, drive->inode_usage);
+
+            // SMART status only for root and physical devices
+            if (geteuid() == 0 && !drive->is_cloud_storage && strcmp(drive->drive_type, "Local Drive") == 0)
+            {
+                char smart_status[128];
+                get_smart_status(drive->device, smart_status, sizeof(smart_status));
+                if (smart_status[0])
+                {
+                    printf("  SMART:         %s\n", smart_status);
+                }
+                else
+                {
+                    printf("  SMART:         No data\n");
+                }
+            }
+
+            // Progress bar
+            int terminal_width = get_terminal_width();
+            int box_width = terminal_width * TERMINAL_WIDTH_PERCENTAGE / TERMINAL_WIDTH_DIVISOR;
+            if (box_width > MAX_BOX_WIDTH)
+                box_width = MAX_BOX_WIDTH;
+            if (box_width < MIN_BOX_WIDTH)
+                box_width = MIN_BOX_WIDTH;
+            int content_width = box_width - FRAME_PADDING;
+
+            int bar_visible_len = visible_length(drive->progress_bar);
+            int bar_padding = content_width - bar_visible_len;
+            printf("  %s%*s\n", drive->progress_bar, bar_padding, "");
+
+            // Free allocated memory
+            free(drive->progress_bar);
         }
 
-        // Progress bar
-        int terminal_width = get_terminal_width();
-        int box_width = terminal_width * TERMINAL_WIDTH_PERCENTAGE / TERMINAL_WIDTH_DIVISOR;
-        if (box_width > MAX_BOX_WIDTH)
-            box_width = MAX_BOX_WIDTH;
-        if (box_width < MIN_BOX_WIDTH)
-            box_width = MIN_BOX_WIDTH;
-        int content_width = box_width - FRAME_PADDING;
-
-        int bar_visible_len = visible_length(drive->progress_bar);
-        int bar_padding = content_width - bar_visible_len;
-        printf("  %s%*s\n", drive->progress_bar, bar_padding, "");
-
-        // Free allocated memory
-        free(drive->progress_bar);
-    }
-
-    if (drive_count == 0)
-    {
-        printf("No drives found.\n");
-    }
-    else
-    {
-        printf("A total of %d drives found.\n", drive_count);
+        if (drive_count == 0)
+        {
+            printf("No drives found.\n");
+        }
+        else
+        {
+            printf("A total of %d drives found.\n", drive_count);
+        }
     }
 
     return 0;
