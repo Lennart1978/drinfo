@@ -48,6 +48,10 @@ sudo make install
 sudo make uninstall
 ```
 
+## Archlinux:
+
+There is "drinfo-git" in the AUR !
+
 ## Screenshot
 
 ![screenshot](screenshot.jpg)
